@@ -1,6 +1,6 @@
 {
   "name": "stupidbutton",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Botão com contador em Node.js",
   "main": "index.js",
   "scripts": {

@@ -3,12 +3,116 @@ const app = express();
 const port = 3000;
 
 // Versão da aplicação
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.0.1';
 
-// Armazenar contadores por sessão (em memória)
-// Cada usuário terá seu próprio contador
+// ============================================
+// SISTEMA DE LOGGING PROFISSIONAL
+// ============================================
+
+// Níveis de log
+const LOG_LEVELS = {
+    ERROR: 'ERROR',
+    WARN: 'WARN',
+    INFO: 'INFO',
+    DEBUG: 'DEBUG'
+};
+
+// Nível atual (produção = INFO, desenvolvimento = DEBUG)
+const CURRENT_LOG_LEVEL = process.env.LOG_LEVEL || 'INFO';
+
+// Função para formatar timestamp
+function getTimestamp() {
+    return new Date().toISOString();
+}
+
+// Função principal de log
+function log(level, message, meta = {}) {
+    // Verifica se deve logar baseado no nível
+    const levels = Object.values(LOG_LEVELS);
+    const currentIndex = levels.indexOf(CURRENT_LOG_LEVEL);
+    const messageIndex = levels.indexOf(level);
+    
+    if (messageIndex > currentIndex) return;
+
+    const logEntry = {
+        timestamp: getTimestamp(),
+        level: level,
+        service: 'stupid-button',
+        version: APP_VERSION,
+        message: message,
+        ...meta
+    };
+
+    // Em produção, logs em JSON para facilitar parsing
+    if (process.env.NODE_ENV === 'production') {
+        console.log(JSON.stringify(logEntry));
+    } else {
+        // Em desenvolvimento, formato legível
+        const prefix = `[${logEntry.timestamp}] [${level}]`;
+        console.log(`${prefix} ${message}`);
+        if (Object.keys(meta).length > 0) {
+            console.log(`  └─ ${JSON.stringify(meta)}`);
+        }
+    }
+}
+
+// Helpers para cada nível
+const logger = {
+    error: (message, meta) => log(LOG_LEVELS.ERROR, message, meta),
+    warn: (message, meta) => log(LOG_LEVELS.WARN, message, meta),
+    info: (message, meta) => log(LOG_LEVELS.INFO, message, meta),
+    debug: (message, meta) => log(LOG_LEVELS.DEBUG, message, meta)
+};
+
+// ============================================
+// MÉTRICAS E ESTATÍSTICAS
+// ============================================
+
+const metrics = {
+    totalRequests: 0,
+    totalClicks: 0,
+    totalResets: 0,
+    errors: 0,
+    startTime: Date.now(),
+    users: new Set()
+};
+
+// Armazenar contadores por sessão
 const contadores = new Map();
 let proximoId = 1;
+
+// ============================================
+// MIDDLEWARES
+// ============================================
+
+// Middleware de logging de requisições
+app.use((req, res, next) => {
+    const startTime = Date.now();
+    metrics.totalRequests++;
+    
+    // Log da requisição
+    logger.info(`Requisição recebida`, {
+        method: req.method,
+        path: req.path,
+        ip: req.ip || req.connection.remoteAddress,
+        userAgent: req.headers['user-agent']
+    });
+
+    // Interceptar resposta para log
+    const originalSend = res.send;
+    res.send = function(data) {
+        const duration = Date.now() - startTime;
+        logger.info(`Resposta enviada`, {
+            method: req.method,
+            path: req.path,
+            statusCode: res.statusCode,
+            duration: `${duration}ms`
+        });
+        originalSend.call(this, data);
+    };
+
+    next();
+});
 
 // Middleware para servir arquivos estáticos
 app.use(express.static('public'));
@@ -16,24 +120,38 @@ app.use(express.json());
 
 // Middleware para identificar usuários
 app.use((req, res, next) => {
-    // Pega o ID do usuário dos cookies ou cria um novo
     let userId = req.headers.cookie?.split('; ').find(row => row.startsWith('userId='))?.split('=')[1];
     
     if (!userId) {
         userId = proximoId++;
-        // Armazena o contador do usuário
         contadores.set(userId, 0);
-        // Define o cookie com o ID do usuário
         res.setHeader('Set-Cookie', [`userId=${userId}; Path=/; HttpOnly`]);
+        metrics.users.add(userId);
+        
+        logger.info(`Novo usuário criado`, {
+            userId: userId,
+            totalUsers: metrics.users.size
+        });
     }
     
+    req.userId = userId;
     req.userId = userId;
     next();
 });
 
+// ============================================
+// ROTAS
+// ============================================
+
 // Rota para obter o contador do usuário atual
 app.get('/api/contador', (req, res) => {
     const contador = contadores.get(req.userId) || 0;
+    
+    logger.debug(`Contador consultado`, {
+        userId: req.userId,
+        contador: contador
+    });
+    
     res.json({ contador });
 });
 
@@ -41,22 +159,74 @@ app.get('/api/contador', (req, res) => {
 app.post('/api/incrementar', (req, res) => {
     const contadorAtual = contadores.get(req.userId) || 0;
     contadores.set(req.userId, contadorAtual + 1);
+    metrics.totalClicks++;
+    
+    logger.info(`Clique registrado`, {
+        userId: req.userId,
+        novoValor: contadores.get(req.userId),
+        totalCliques: metrics.totalClicks
+    });
+    
     res.json({ contador: contadores.get(req.userId) });
 });
 
 // Rota para zerar o contador do usuário atual
 app.post('/api/zerar', (req, res) => {
     contadores.set(req.userId, 0);
+    metrics.totalResets++;
+    
+    logger.info(`Contador zerado`, {
+        userId: req.userId,
+        totalResets: metrics.totalResets
+    });
+    
     res.json({ contador: 0 });
 });
 
 // Rota para obter a versão
 app.get('/api/version', (req, res) => {
+    logger.debug(`Versão consultada`, { version: APP_VERSION });
     res.json({ version: APP_VERSION });
+});
+
+// Rota para métricas (monitoramento)
+app.get('/api/metrics', (req, res) => {
+    const uptime = Math.floor((Date.now() - metrics.startTime) / 1000);
+    
+    logger.info(`Métricas consultadas`, {
+        uptime: `${Math.floor(uptime / 60)} minutos`,
+        totalRequests: metrics.totalRequests,
+        totalClicks: metrics.totalClicks,
+        totalResets: metrics.totalResets,
+        activeUsers: metrics.users.size
+    });
+    
+    res.json({
+        uptime: `${Math.floor(uptime / 60)} minutos`,
+        totalRequests: metrics.totalRequests,
+        totalClicks: metrics.totalClicks,
+        totalResets: metrics.totalResets,
+        activeUsers: metrics.users.size,
+        version: APP_VERSION
+    });
+});
+
+// Rota para health check (para load balancer)
+app.get('/health', (req, res) => {
+    res.status(200).json({
+        status: 'healthy',
+        timestamp: getTimestamp(),
+        version: APP_VERSION,
+        uptime: Math.floor((Date.now() - metrics.startTime) / 1000)
+    });
 });
 
 // Rota principal
 app.get('/', (req, res) => {
+    logger.info(`Página principal acessada`, {
+        userId: req.userId
+    });
+    
     res.send(`
         <!DOCTYPE html>
         <html lang="pt-BR">
@@ -200,7 +370,6 @@ app.get('/', (req, res) => {
                 const contadorDisplay = document.getElementById('contadorDisplay');
                 const versionDisplay = document.getElementById('versionDisplay');
 
-                // Função para buscar a versão
                 async function buscarVersao() {
                     try {
                         const response = await fetch('/api/version');
@@ -211,7 +380,6 @@ app.get('/', (req, res) => {
                     }
                 }
 
-                // Função para atualizar o contador na página
                 async function atualizarContador() {
                     try {
                         const response = await fetch('/api/contador');
@@ -222,7 +390,6 @@ app.get('/', (req, res) => {
                     }
                 }
 
-                // Função para incrementar o contador
                 async function incrementarContador() {
                     try {
                         const response = await fetch('/api/incrementar', {
@@ -233,16 +400,12 @@ app.get('/', (req, res) => {
                         });
                         const data = await response.json();
                         contadorDisplay.textContent = data.contador;
-                        
-                        // Criar confetes
                         criarConfetes();
-                        
                     } catch (error) {
                         console.error('Erro ao incrementar contador:', error);
                     }
                 }
 
-                // Função para zerar o contador
                 async function zerarContador() {
                     if (confirm('Tem certeza que quer zerar seu contador?')) {
                         try {
@@ -260,7 +423,6 @@ app.get('/', (req, res) => {
                     }
                 }
 
-                // Função para criar confetes
                 function criarConfetes() {
                     const emojis = ['🎉', '✨', '⭐', '🌟', '💫', '🎊', '❤️', '😄'];
                     for (let i = 0; i < 8; i++) {
@@ -280,11 +442,9 @@ app.get('/', (req, res) => {
                     }
                 }
 
-                // Eventos
                 botao.addEventListener('click', incrementarContador);
                 botaoZerar.addEventListener('click', zerarContador);
 
-                // Carregar dados iniciais
                 buscarVersao();
                 atualizarContador();
             </script>
@@ -293,5 +453,50 @@ app.get('/', (req, res) => {
     `);
 });
 
-// Iniciar o servidor
-app.listen(port);
+// ============================================
+// TRATAMENTO DE ERROS
+// ============================================
+
+// Capturar erros não tratados
+process.on('uncaughtException', (error) => {
+    logger.error(`Erro não tratado`, {
+        error: error.message,
+        stack: error.stack
+    });
+    // Em produção, não sair do processo
+    if (process.env.NODE_ENV !== 'production') {
+        process.exit(1);
+    }
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+    logger.error(`Promise rejeitada não tratada`, {
+        reason: reason,
+        promise: promise
+    });
+});
+
+// ============================================
+// INICIAR SERVIDOR
+// ============================================
+
+app.listen(port, () => {
+    logger.info(`Servidor iniciado com sucesso`, {
+        port: port,
+        environment: process.env.NODE_ENV || 'development',
+        version: APP_VERSION,
+        logLevel: CURRENT_LOG_LEVEL
+    });
+    
+    logger.info(`Endpoints disponíveis:`, {
+        endpoints: [
+            'GET  /',
+            'GET  /health',
+            'GET  /api/version',
+            'GET  /api/contador',
+            'POST /api/incrementar',
+            'POST /api/zerar',
+            'GET  /api/metrics'
+        ]
+    });
+});
