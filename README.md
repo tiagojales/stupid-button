@@ -2,7 +2,7 @@
 
 Uma aplicação web simples e divertida que conta cliques individualmente para cada usuário.
 
-![Version](https://img.shields.io/badge/version-1.0.0-blue)
+![Version](https://img.shields.io/badge/version-1.0.1-blue)
 ![Node.js](https://img.shields.io/badge/Node.js-26-green)
 ![Express](https://img.shields.io/badge/Express-4.18.2-lightgrey)
 ![Docker](https://img.shields.io/badge/Docker-Ready-blue)
